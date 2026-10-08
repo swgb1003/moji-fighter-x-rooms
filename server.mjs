@@ -2,7 +2,8 @@ import http from 'node:http';
 import { randomBytes, randomInt } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-export const VERSION = 'moji-fighter-x-rooms-v1';
+export const VERSION = 'moji-fighter-x-rooms-v2';
+const inputKinds = ['special', 'cheer', 'guard'];
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 1000 } = {}) {
@@ -23,13 +24,13 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
     for (const [code, r] of rooms) {
       if (now() - r.players[0].seen > grace || now() - r.created > 24 * 3600000) { rooms.delete(code); continue; }
       if (r.players[1] && now() - r.players[1].seen > grace) {
-        r.players[1] = null; r.players[0].ready = false; r.stage = 'lobby'; r.frame = null; r.revision++;
+        r.players[1] = null; r.players[0].ready = false; r.stage = 'lobby'; r.frame = null; r.inputs = []; r.revision++;
       }
     }
   }
   function view(r, side, credential = false) {
     return { code: r.code, side, token: credential ? r.players[side].token : '', revision: r.revision,
-      stage: r.stage, matchId: r.matchId, seed: r.seed, frame: r.frame,
+      stage: r.stage, matchId: r.matchId, seed: r.seed, frame: r.frame, inputs: r.inputs,
       players: r.players.map(p => ({ joined: !!p, ready: !!p?.ready, build: p?.build ?? null })) };
   }
   const server = http.createServer(async (req, res) => {
@@ -66,9 +67,9 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
         let code;
         do { code = Array.from({ length: 6 }, () => alphabet[randomInt(alphabet.length)]).join(''); } while (rooms.has(code));
         const r = { code, players: [player(body.build), null], revision: 1, stage: 'lobby', seed: 0, matchId: 0,
-          frame: null, created: now() }; rooms.set(code, r); result = view(r, 0, true);
+          frame: null, inputs: [], created: now() }; rooms.set(code, r); result = view(r, 0, true);
       } else {
-        const match = /^\/rooms\/([A-Z2-9]{6})(?:\/(join|build|ready|start|frame|lobby|leave))?$/.exec(path);
+        const match = /^\/rooms\/([A-Z2-9]{6})(?:\/(join|build|ready|start|frame|input|lobby|leave))?$/.exec(path);
         if (!match) fail(404, '部屋が見つかりません。');
         const r = rooms.get(match[1]); if (!r) fail(404, '部屋が見つかりません。コードを確認してください。');
         const action = match[2];
@@ -92,7 +93,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
           } else if (action === 'start') {
             if (side !== 0) fail(403, 'ホストが対戦を開始します。');
             if (r.stage !== 'lobby' || !r.players.every(p => p?.ready)) fail(409, '2人の準備完了を待ってください。');
-            r.stage = 'battle'; r.seed = randomInt(1, 2147483647); r.matchId++; r.frame = null; r.revision++; result = view(r, side);
+            r.stage = 'battle'; r.seed = randomInt(1, 2147483647); r.matchId++; r.frame = null; r.inputs = []; r.revision++; result = view(r, side);
           } else if (action === 'frame') {
             if (side !== 0) fail(403, 'ホストだけが試合を同期できます。');
             const f = body.frame;
@@ -105,12 +106,23 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
               fail(400, '試合結果を読み取れません。');
             if (!r.frame || f.sequence > r.frame.sequence) r.frame = f;
             result = { ok: true };
+          } else if (action === 'input') {
+            // The guest's spectator actions (special / cheer / just guard); the host applies them to its simulation.
+            if (side !== 1) fail(403, 'ホストの操作はホストの端末で反映します。');
+            const i = body.input;
+            if (r.stage !== 'battle' || body.matchId !== r.matchId) fail(409, '試合が切り替わりました。');
+            if (!i || !Number.isInteger(i.sequence) || i.sequence < 1 || !inputKinds.includes(i.kind)) fail(400, '操作を読み取れません。');
+            if (i.sequence > (r.inputs.at(-1)?.sequence ?? 0)) {
+              r.inputs.push({ sequence: i.sequence, kind: i.kind });
+              if (r.inputs.length > 16) r.inputs.shift();
+            }
+            result = view(r, side);
           } else if (action === 'lobby') {
-            r.stage = 'lobby'; r.frame = null; for (const item of r.players) if (item) item.ready = false;
+            r.stage = 'lobby'; r.frame = null; r.inputs = []; for (const item of r.players) if (item) item.ready = false;
             r.revision++; result = view(r, side);
           } else if (action === 'leave') {
             if (side === 0) rooms.delete(r.code);
-            else { r.players[1] = null; r.players[0].ready = false; r.stage = 'lobby'; r.frame = null; r.revision++; }
+            else { r.players[1] = null; r.players[0].ready = false; r.stage = 'lobby'; r.frame = null; r.inputs = []; r.revision++; }
             result = { ok: true };
           } else fail(404, 'この操作は利用できません。');
         }

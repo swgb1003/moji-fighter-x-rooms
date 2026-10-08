@@ -91,6 +91,29 @@ test('invalid builds, incompatible versions and room limits produce actionable e
   assert.equal((await call('/rooms', { version: VERSION, build: build() })).status, 200);
   assert.equal((await call('/rooms', { version: VERSION, build: build() })).status, 503);
 });
+test('only the guest posts spectator actions; host reads them in order for the current match', async t => {
+  const call = await setup(t);
+  const host = await call('/rooms', { version: VERSION, build: build() });
+  const path = `/rooms/${host.code}`;
+  const guest = await call(path + '/join', { version: VERSION, build: build('史') });
+  const input = (sequence, kind, token, matchId = 1) => call(path + '/input', { matchId, input: { sequence, kind } }, token);
+  assert.equal((await input(1, 'guard', guest.token)).status, 409); // not in battle yet
+  await call(path + '/ready', { ready: true }, host.token);
+  await call(path + '/ready', { ready: true }, guest.token);
+  await call(path + '/start', {}, host.token);
+  assert.equal((await input(1, 'special', host.token)).status, 403);
+  assert.equal((await input(1, 'fly', guest.token)).status, 400);
+  assert.equal((await input(1, 'guard', guest.token, 2)).status, 409);
+  assert.equal((await input(1, 'guard', guest.token)).status, 200);
+  await input(2, 'cheer', guest.token);
+  await input(2, 'special', guest.token); // duplicate sequence is ignored
+  for (let s = 3; s <= 20; s++) await input(s, 'guard', guest.token);
+  const seen = await call(path, null, host.token);
+  assert.equal(seen.inputs.length, 16); assert.equal(seen.inputs.at(-1).sequence, 20);
+  assert.equal(seen.inputs[0].sequence, 5);
+  await call(path + '/lobby', {}, host.token);
+  assert.deepEqual((await call(path, null, host.token)).inputs, []);
+});
 test('behind a trusted proxy, rate limits apply per forwarded client', async t => {
   process.env.TRUST_PROXY = '1'; t.after(() => { delete process.env.TRUST_PROXY; });
   const server = createRoomServer();
