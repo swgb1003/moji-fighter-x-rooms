@@ -1,0 +1,104 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRoomServer, VERSION } from './server.mjs';
+
+const build = (character = '力') => ({ character, fontType: 1, weaponSize: 1, gripType: 0, battleStyle: 0,
+  weaponFlip: 0, gripPosition: .5, customGrip: false, gripPoint: { x: .5, y: .5 } });
+async function setup(t, options) {
+  const server = createRoomServer(options);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  return async (path, body, token) => {
+    const response = await fetch(url + path, { method: body ? 'POST' : 'GET', headers: {
+      'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, ...await response.json() };
+  };
+}
+test('two friends share code, loadouts and ready state; only host starts', async t => {
+  const call = await setup(t);
+  const host = await call('/rooms', { version: VERSION, build: build() });
+  assert.equal(host.status, 200); assert.match(host.code, /^[A-HJ-NP-Z2-9]{6}$/); assert.equal(host.side, 0);
+  const path = `/rooms/${host.code}`;
+  assert.equal((await call(path)).status, 401);
+  const guest = await call(path + '/join', { version: VERSION, build: build('史') });
+  assert.equal(guest.side, 1); assert.notEqual(guest.token, host.token);
+  assert.equal((await call(path + '/join', { version: VERSION, build: build() })).status, 409);
+  assert.equal((await call(path + '/start', {}, host.token)).status, 409);
+  await call(path + '/ready', { ready: true }, host.token);
+  await call(path + '/ready', { ready: true }, guest.token);
+  assert.equal((await call(path + '/start', {}, guest.token)).status, 403);
+  const battle = await call(path + '/start', {}, host.token);
+  assert.equal(battle.stage, 'battle'); assert.ok(battle.seed > 0); assert.equal(battle.matchId, 1);
+  const remote = await call(path, null, guest.token);
+  assert.equal(remote.seed, battle.seed); assert.equal(remote.players[0].build.character, '力');
+  assert.equal(remote.players[1].build.character, '史'); assert.equal(remote.token, '');
+  assert.equal(JSON.stringify(remote).includes(host.token), false);
+  assert.equal((await call(path + '/build', { build: build('木') }, guest.token)).status, 409);
+});
+test('changing equipment revokes own ready; returning to lobby revokes both', async t => {
+  const call = await setup(t), host = await call('/rooms', { version: VERSION, build: build() }), path = `/rooms/${host.code}`;
+  const guest = await call(path + '/join', { version: VERSION, build: build('史') });
+  await call(path + '/ready', { ready: true }, host.token); await call(path + '/ready', { ready: true }, guest.token);
+  const edited = await call(path + '/build', { build: build('木') }, guest.token);
+  assert.equal(edited.players[1].ready, false); assert.equal(edited.players[0].ready, true);
+  await call(path + '/ready', { ready: true }, guest.token); await call(path + '/start', {}, host.token);
+  const lobby = await call(path + '/lobby', {}, guest.token);
+  assert.equal(lobby.stage, 'lobby'); assert.equal(lobby.players.every(p => !p.ready), true);
+});
+test('host frames and final result are monotonic and cannot be forged by guest or stale match', async t => {
+  const call = await setup(t), host = await call('/rooms', { version: VERSION, build: build() }), path = `/rooms/${host.code}`;
+  const guest = await call(path + '/join', { version: VERSION, build: build('史') });
+  await call(path + '/ready', { ready: true }, host.token); await call(path + '/ready', { ready: true }, guest.token);
+  const match = await call(path + '/start', {}, host.token);
+  const frame = { sequence: 10, clock: 42, actors: [{ hp: 0 }, { hp: 40 }], events: [], ended: true,
+    result: { winner: 1, hpRemaining: [0, 40], metrics: [{ damageDealt: 60 }, { damageDealt: 100 }], finishReason: 'KO' } };
+  assert.equal((await call(path + '/frame', { matchId: match.matchId, frame }, guest.token)).status, 403);
+  assert.equal((await call(path + '/frame', { matchId: 0, frame }, host.token)).status, 409);
+  assert.equal((await call(path + '/frame', { matchId: match.matchId, frame }, host.token)).status, 200);
+  await call(path + '/frame', { matchId: match.matchId, frame: { ...frame, sequence: 9 } }, host.token);
+  const remote = await call(path, null, guest.token);
+  assert.equal(remote.frame.sequence, 10); assert.equal(remote.frame.result.winner, 1);
+  const invalid = { ...frame, sequence: 11, result: { winner: 9 } };
+  assert.equal((await call(path + '/frame', { matchId: match.matchId, frame: invalid }, host.token)).status, 400);
+});
+test('guest leave opens slot and cancels battle; host leave invalidates code', async t => {
+  const call = await setup(t), host = await call('/rooms', { version: VERSION, build: build() }), path = `/rooms/${host.code}`;
+  const guest = await call(path + '/join', { version: VERSION, build: build('史') });
+  await call(path + '/leave', {}, guest.token);
+  const state = await call(path, null, host.token);
+  assert.equal(state.players[1].joined, false); assert.equal(state.stage, 'lobby');
+  assert.equal((await call(path, null, guest.token)).status, 401);
+  assert.equal((await call(path + '/join', { version: VERSION, build: build('木') })).status, 200);
+  await call(path + '/leave', {}, host.token);
+  assert.equal((await call(path, null, host.token)).status, 404);
+});
+test('disconnect expiry removes guest and deletes abandoned host rooms', async t => {
+  let clock = 1000;
+  const call = await setup(t, { now: () => clock, grace: 100 });
+  const host = await call('/rooms', { version: VERSION, build: build() }), path = `/rooms/${host.code}`;
+  await call(path + '/join', { version: VERSION, build: build('史') });
+  clock += 70; await call(path, null, host.token); clock += 50;
+  const state = await call(path, null, host.token); assert.equal(state.players[1].joined, false);
+  clock += 101; assert.equal((await call(path, null, host.token)).status, 404);
+});
+test('invalid builds, incompatible versions and room limits produce actionable errors', async t => {
+  const call = await setup(t, { maxRooms: 1 });
+  assert.equal((await call('/rooms', { version: 'old', build: build() })).status, 409);
+  assert.equal((await call('/rooms', { version: VERSION, build: build('ab') })).status, 400);
+  assert.equal((await call('/rooms', { version: VERSION, build: { ...build(), gripPoint: { x: -1, y: .5 } } })).status, 400);
+  assert.equal((await call('/rooms', { version: VERSION, build: build() })).status, 200);
+  assert.equal((await call('/rooms', { version: VERSION, build: build() })).status, 503);
+});
+test('behind a trusted proxy, rate limits apply per forwarded client', async t => {
+  process.env.TRUST_PROXY = '1'; t.after(() => { delete process.env.TRUST_PROXY; });
+  const server = createRoomServer();
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const url = `http://127.0.0.1:${server.address().port}/health`;
+  const get = ip => fetch(url, { headers: { 'X-Forwarded-For': `${ip}, 10.0.0.1` } }).then(r => r.status);
+  for (let i = 0; i < 600; i++) await get('203.0.113.1');
+  assert.equal(await get('203.0.113.1'), 429);
+  assert.equal(await get('203.0.113.2'), 200);
+});

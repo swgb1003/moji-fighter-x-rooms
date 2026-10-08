@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: moji-fighter-x-rooms
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: "off"
+    envVars:
+      - key: PORT
+        value: "8787"
+      - key: HOST
+        value: "0.0.0.0"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: ALLOWED_ORIGIN
+        value: https://moji-fighter-x.vercel.app
