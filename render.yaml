@@ -1,3 +1,4 @@
+# Use this Blueprint from a repository containing only the Server directory's files.
 services:
   - type: web
     name: moji-fighter-x-rooms
@@ -17,3 +18,6 @@ services:
         value: "1"
       - key: ALLOWED_ORIGIN
         value: https://moji-fighter-x.vercel.app
+      # Secret: set in the Render dashboard (never commit the value).
+      - key: ANTHROPIC_API_KEY
+        sync: false

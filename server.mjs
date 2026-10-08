@@ -1,13 +1,19 @@
 import http from 'node:http';
 import { randomBytes, randomInt } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { checkName, sanitizeSpecial, createClaudeGenerator, createFakeGenerator } from './specials.mjs';
 
-export const VERSION = 'moji-fighter-x-rooms-v2';
-const inputKinds = ['special', 'cheer', 'guard'];
+export const VERSION = 'moji-fighter-x-rooms-v3';
+const inputKinds = ['special', 'cheer'];
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
-export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 1000 } = {}) {
+export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 1000,
+  generateSpecial = process.env.SPECIAL_FAKE === '1' ? createFakeGenerator() : createClaudeGenerator(),
+  specialsPerHour = 15, specialsPerDay = Number(process.env.SPECIAL_DAILY_LIMIT || 500) } = {}) {
   const rooms = new Map(), limits = new Map();
+  // AI generation costs money per call: per-client hourly limit, a daily total, and a cache for repeated names.
+  const specialLimits = new Map(), specialCache = new Map(), pending = new Map();
+  let specialDay = { count: 0, reset: now() + 86400000 };
   const segmenter = new Intl.Segmenter('ja', { granularity: 'grapheme' });
   function build(b) {
     if (!b || typeof b.character !== 'string' || b.character.length > 12 ||
@@ -18,7 +24,8 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       if (!Number.isFinite(value) || value < 0 || value > 1) fail(400, '持ち手の位置を確認してください。');
     return { character: b.character.trim(), fontType: b.fontType, weaponSize: b.weaponSize, gripType: b.gripType,
       battleStyle: b.battleStyle, weaponFlip: b.weaponFlip, gripPosition: b.gripPosition,
-      gripPoint: { x: b.gripPoint.x, y: b.gripPoint.y }, customGrip: Boolean(b.customGrip) };
+      gripPoint: { x: b.gripPoint.x, y: b.gripPoint.y }, customGrip: Boolean(b.customGrip),
+      special: sanitizeSpecial(b.special, b.character.trim()) };
   }
   function sweep() {
     for (const [code, r] of rooms) {
@@ -52,7 +59,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       if (limits.size > 4096) for (const [k, v] of limits) if (t > v.reset) limits.delete(k);
       sweep();
       const path = new URL(req.url, 'http://local').pathname;
-      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION })); return; }
+      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial) })); return; }
       let body = {};
       if (req.method === 'POST') {
         let size = 0, chunks = [];
@@ -61,7 +68,34 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       }
       const player = b => ({ token: randomBytes(32).toString('hex'), build: build(b), ready: false, seen: now() });
       let result;
-      if (path === '/rooms' && req.method === 'POST') {
+      if (path === '/specials' && req.method === 'POST') {
+        if (body.version !== VERSION) fail(409, 'ゲームのバージョンをそろえてください。');
+        const name = checkName(body.name, body.character), character = body.character.trim();
+        if (!generateSpecial) fail(503, 'AI の技づくりは準備中です。');
+        const key = `${character}
+${name}`;
+        let made = specialCache.get(key);
+        if (!made) {
+          const quota = specialLimits.get(ip) ?? { count: 0, reset: t + 3600000 };
+          if (t > quota.reset) { quota.count = 0; quota.reset = t + 3600000; }
+          if (t > specialDay.reset) specialDay = { count: 0, reset: t + 86400000 };
+          if (quota.count >= specialsPerHour) fail(429, 'AI の技づくりは 1 時間に ' + specialsPerHour + ' 回までです。');
+          if (specialDay.count >= specialsPerDay) fail(429, '今日の AI の技づくりは上限に達しました。明日お試しください。');
+          quota.count++; specialDay.count++; specialLimits.set(ip, quota);
+          if (specialLimits.size > 4096) for (const [k, v] of specialLimits) if (t > v.reset) specialLimits.delete(k);
+          // Same name requested twice at once: share one AI call.
+          let job = pending.get(key);
+          if (!job) { job = generateSpecial({ character, name }); pending.set(key, job); }
+          let raw;
+          try { raw = await job; } finally { pending.delete(key); }
+          if (!raw || raw.ok === false) fail(422, (typeof raw?.reason === 'string' && raw.reason.trim().slice(0, 60)) || 'この技名では作れませんでした。');
+          made = sanitizeSpecial({ ...raw, name }, character);
+          if (!made) fail(502, 'AI で技を作れませんでした。');
+          specialCache.set(key, made);
+          if (specialCache.size > 2000) specialCache.delete(specialCache.keys().next().value);
+        }
+        result = { special: made };
+      } else if (path === '/rooms' && req.method === 'POST') {
         if (body.version !== VERSION) fail(409, 'ゲームのバージョンをそろえてください。');
         if (rooms.size >= maxRooms) fail(503, '現在、部屋がいっぱいです。');
         let code;

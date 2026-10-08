@@ -97,17 +97,18 @@ test('only the guest posts spectator actions; host reads them in order for the c
   const path = `/rooms/${host.code}`;
   const guest = await call(path + '/join', { version: VERSION, build: build('史') });
   const input = (sequence, kind, token, matchId = 1) => call(path + '/input', { matchId, input: { sequence, kind } }, token);
-  assert.equal((await input(1, 'guard', guest.token)).status, 409); // not in battle yet
+  assert.equal((await input(1, 'cheer', guest.token)).status, 409); // not in battle yet
   await call(path + '/ready', { ready: true }, host.token);
   await call(path + '/ready', { ready: true }, guest.token);
   await call(path + '/start', {}, host.token);
   assert.equal((await input(1, 'special', host.token)).status, 403);
   assert.equal((await input(1, 'fly', guest.token)).status, 400);
-  assert.equal((await input(1, 'guard', guest.token, 2)).status, 409);
-  assert.equal((await input(1, 'guard', guest.token)).status, 200);
+  assert.equal((await input(1, 'guard', guest.token)).status, 400); // just guard was removed
+  assert.equal((await input(1, 'cheer', guest.token, 2)).status, 409);
+  assert.equal((await input(1, 'cheer', guest.token)).status, 200);
   await input(2, 'cheer', guest.token);
   await input(2, 'special', guest.token); // duplicate sequence is ignored
-  for (let s = 3; s <= 20; s++) await input(s, 'guard', guest.token);
+  for (let s = 3; s <= 20; s++) await input(s, 'cheer', guest.token);
   const seen = await call(path, null, host.token);
   assert.equal(seen.inputs.length, 16); assert.equal(seen.inputs.at(-1).sequence, 20);
   assert.equal(seen.inputs[0].sequence, 5);
@@ -124,4 +125,58 @@ test('behind a trusted proxy, rate limits apply per forwarded client', async t =
   for (let i = 0; i < 600; i++) await get('203.0.113.1');
   assert.equal(await get('203.0.113.1'), 429);
   assert.equal(await get('203.0.113.2'), 200);
+});
+
+const designed = { ok: true, reason: '', reading: 'えんりゅういっせん', steps: ['Launch', 'StrokeShot', 'Teleport'], power: 5, speed: 5, reach: 5,
+  element: 'fire', effect: 'pillar', primary: '#ff3300', secondary: 'red', callout: '燃え尽きろ！', description: '炎の龍が昇る。' };
+test('special moves: name rules, AI design is clamped to the stat budget, cached, and rate limited', async t => {
+  let calls = 0;
+  const call = await setup(t, { specialsPerHour: 3, generateSpecial: async ({ character, name }) => {
+    calls++; assert.equal(character, '炎'); return name === '炎上商法' ? { ok: false, reason: '公開に向かない名前です。' } : designed; } });
+  const make = (name, character = '炎', version = VERSION) => call('/specials', { version, character, name });
+  assert.equal((await make('炎龍一閃', '炎', 'old')).status, 409);
+  assert.equal((await make('龍一閃')).status, 400); // must contain the chosen character
+  assert.equal((await make('炎炎炎炎炎炎炎炎')).status, 400); // 8 characters
+  assert.equal(calls, 0);
+  const made = await make('炎龍一閃');
+  assert.equal(made.status, 200);
+  const s = made.special;
+  assert.equal(s.name, '炎龍一閃'); assert.equal(s.character, '炎');
+  assert.deepEqual(s.steps, ['Launch', 'StrokeShot']); // unknown motion dropped
+  assert.ok(s.power + s.speed + s.reach <= 9 && Math.max(s.power, s.speed, s.reach) <= 5);
+  assert.equal(s.primary, '#FF3300'); assert.equal(s.secondary, '#F6B23C'); // invalid colour falls back to the element's
+  assert.equal((await make('炎龍一閃')).special.name, '炎龍一閃');
+  assert.equal(calls, 1); // same name served from cache
+  const refused = await make('炎上商法');
+  assert.equal(refused.status, 422); assert.equal(refused.error, '公開に向かない名前です。');
+  await make('炎の拳');
+  assert.equal((await make('炎の蹴り')).status, 429);
+  assert.equal(calls, 3);
+});
+test('special generation is unavailable without an AI key; builds carry a sanitized special', async t => {
+  const call = await setup(t, { generateSpecial: null });
+  assert.equal((await call('/health')).specials, false);
+  assert.equal((await call('/specials', { version: VERSION, character: '力', name: '力技' })).status, 503);
+  const special = { ...designed, name: '怪力乱神', steps: ['Whirl'], power: 9, speed: 9, reach: 9 };
+  const host = await call('/rooms', { version: VERSION, build: { ...build(), special } });
+  assert.deepEqual(host.players[0].build.special.steps, ['Whirl']);
+  assert.ok(host.players[0].build.special.power <= 5);
+  const other = await call('/rooms', { version: VERSION, build: { ...build(), special: { ...special, name: '別の技' } } });
+  assert.equal(other.players[0].build.special, null); // a special for another character is dropped
+});
+test('the Claude request asks for the schema-shaped design and reads it back', async () => {
+  const { createClaudeGenerator } = await import('./specials.mjs');
+  let sent, headers;
+  const generate = createClaudeGenerator({ apiKey: 'test-key', fetch: async (url, init) => {
+    sent = JSON.parse(init.body); headers = new Headers(init.headers);
+    return new Response(JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', model: sent.model, stop_reason: 'end_turn',
+      content: [{ type: 'text', text: JSON.stringify(designed) }], usage: { input_tokens: 1, output_tokens: 1 } }),
+      { status: 200, headers: { 'content-type': 'application/json' } });
+  } });
+  const raw = await generate({ character: '炎', name: '炎龍一閃' });
+  assert.equal(raw.element, 'fire');
+  assert.equal(sent.model, 'claude-opus-5-5'); assert.equal(sent.fallbacks, 'default');
+  assert.equal(sent.output_config.format.type, 'json_schema'); assert.equal(sent.output_config.effort, 'low');
+  assert.match(sent.messages[0].content, /炎龍一閃/);
+  assert.match(headers.get('anthropic-beta'), /server-side-fallback-2026-07-01/);
 });
