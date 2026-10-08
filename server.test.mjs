@@ -180,3 +180,13 @@ test('the Claude request asks for the schema-shaped design and reads it back', a
   assert.match(sent.messages[0].content, /炎龍一閃/);
   assert.match(headers.get('anthropic-beta'), /server-side-fallback-2026-07-01/);
 });
+test('CORS allows the production site and its Vercel deployment URLs only', async () => {
+  const { allowOrigin } = await import('./server.mjs');
+  const setting = 'https://moji-fighter-x.vercel.app,https://moji-fighter-*-swgb1003-5441s-projects.vercel.app';
+  assert.equal(allowOrigin(setting, 'https://moji-fighter-x.vercel.app'), 'https://moji-fighter-x.vercel.app');
+  assert.equal(allowOrigin(setting, 'https://moji-fighter-fuibyhaby-swgb1003-5441s-projects.vercel.app'),
+    'https://moji-fighter-fuibyhaby-swgb1003-5441s-projects.vercel.app');
+  assert.equal(allowOrigin(setting, 'https://evil.example'), 'https://moji-fighter-x.vercel.app');
+  assert.equal(allowOrigin(setting, 'https://moji-fighter-a.b-swgb1003-5441s-projects.vercel.app'), 'https://moji-fighter-x.vercel.app');
+  assert.equal(allowOrigin(undefined, 'https://x.example'), '*');
+});

@@ -7,6 +7,13 @@ export const VERSION = 'moji-fighter-x-rooms-v3';
 const inputKinds = ['special', 'cheer'];
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
+export function allowOrigin(setting, origin) {
+  const list = String(setting || '*').split(',').map(x => x.trim()).filter(Boolean);
+  if (list.includes('*')) return '*';
+  const match = list.find(p => p === origin || (p.includes('*') && typeof origin === 'string' &&
+    new RegExp('^' + p.split('*').map(x => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[a-z0-9-]+') + '$').test(origin)));
+  return match ? origin : list[0];
+}
 export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 1000,
   generateSpecial = process.env.SPECIAL_FAKE === '1' ? createFakeGenerator() : createClaudeGenerator(),
   specialsPerHour = 15, specialsPerDay = Number(process.env.SPECIAL_DAILY_LIMIT || 500) } = {}) {
@@ -41,8 +48,10 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       players: r.players.map(p => ({ joined: !!p, ready: !!p?.ready, build: p?.build ?? null })) };
   }
   const server = http.createServer(async (req, res) => {
-    const allowed = process.env.ALLOWED_ORIGIN || '*';
+    // ALLOWED_ORIGIN: comma-separated origins; '*' inside one matches a single DNS label (e.g. Vercel deployment URLs).
+    const allowed = allowOrigin(process.env.ALLOWED_ORIGIN, req.headers.origin);
     res.setHeader('Access-Control-Allow-Origin', allowed);
+    if (allowed !== '*') res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
     res.setHeader('Cache-Control', 'no-store');
