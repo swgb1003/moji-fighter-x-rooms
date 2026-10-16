@@ -6,6 +6,7 @@ import { checkName, sanitizeSpecial, createClaudeGenerator, createFakeGenerator 
 export const VERSION = 'moji-fighter-x-rooms-v3';
 const inputKinds = ['special', 'cheer'];
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+export const SPLIT_KANJI = [...'明休林晴清河村体仁仲伸相朋'];
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 export function allowOrigin(setting, origin) {
   const list = String(setting || '*').split(',').map(x => x.trim()).filter(Boolean);
@@ -38,7 +39,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
     const offhandGripPoint = independentOffhandGrip ? b.offhandGripPoint : b.gripPoint;
     for (const value of [offhandGripPosition, offhandGripPoint?.x, offhandGripPoint?.y])
       if (!Number.isFinite(value) || value < 0 || value > 1) fail(400, '左手の持ち手の位置を確認してください。');
-    if (b.splitMing && b.character.trim() !== '明') fail(400, '分離は「明」のみ対応しています。');
+    if (b.splitMing && !SPLIT_KANJI.includes(b.character.trim())) fail(400, 'この漢字は分離に対応していません。');
     return { character: b.character.trim(), fontType: b.fontType, weaponSize: b.weaponSize, gripType: b.gripType,
       battleStyle: b.battleStyle, weaponFlip: b.weaponFlip, gripPosition: b.gripPosition,
       gripPoint: { x: b.gripPoint.x, y: b.gripPoint.y }, customGrip: Boolean(b.customGrip),
@@ -82,7 +83,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       if (limits.size > 4096) for (const [k, v] of limits) if (t > v.reset) limits.delete(k);
       sweep();
       const path = new URL(req.url, 'http://local').pathname;
-      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial), capabilities: { dualGrip: true, splitMing: true, stages: true } })); return; }
+      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial), capabilities: { dualGrip: true, splitMing: true, stages: true, splitCharacters: SPLIT_KANJI } })); return; }
       let body = {};
       if (req.method === 'POST') {
         let size = 0, chunks = [];

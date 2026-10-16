@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRoomServer, VERSION } from './server.mjs';
+import { createRoomServer, VERSION, SPLIT_KANJI } from './server.mjs';
 
 const build = (character = '力') => ({ character, fontType: 1, weaponSize: 1, gripType: 0, battleStyle: 0,
   weaponFlip: 0, gripPosition: .5, customGrip: false, gripPoint: { x: .5, y: .5 } });
@@ -27,6 +27,11 @@ test('dual wield preserves both grips, split components and legacy builds throug
   const legacy = guest.players[1].build;
   assert.equal(legacy.independentOffhandGrip, true);
   assert.deepEqual(legacy.offhandGripPoint, legacy.gripPoint);
+  for (const character of SPLIT_KANJI) {
+    const changed = await call(path + '/build', { build: { ...loadout, character } }, host.token);
+    assert.equal(changed.status, 200); assert.equal(changed.players[0].build.character, character);
+    assert.equal(changed.players[0].build.splitMing, true);
+  }
 });
 
 test('only host selects a valid arena in lobby; changing it revokes both ready states', async t => {
