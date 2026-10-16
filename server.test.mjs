@@ -1,9 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, existsSync } from 'node:fs';
 import { createRoomServer, VERSION, SPLIT_KANJI } from './server.mjs';
 
 const build = (character = '力') => ({ character, fontType: 1, weaponSize: 1, gripType: 0, battleStyle: 0,
   weaponFlip: 0, gripPosition: .5, customGrip: false, gripPoint: { x: .5, y: .5 } });
+
+test('structural catalog is unique, covers all three layouts, and matches the Unity release data', () => {
+  const csv = readFileSync(new URL('./split-kanji.csv', import.meta.url), 'utf8');
+  const rows = csv.split(/\r?\n/).filter(line => line && !line.startsWith('#')).map(line => line.split(','));
+  assert.ok(rows.length > 100);
+  assert.equal(new Set(SPLIT_KANJI).size, rows.length);
+  assert.deepEqual(new Set(rows.map(c => c[3])), new Set(['lr', 'tb', 'enc']));
+  for (const row of rows) { assert.equal(row.length, 9); assert.equal([...row[0]].length, 1); }
+  const unity = new URL('../Assets/Resources/Glyphs/SplitKanji.csv', import.meta.url);
+  if (existsSync(unity)) assert.equal(csv, readFileSync(unity, 'utf8'));
+});
 
 test('dual wield preserves both grips, split components and legacy builds through room sharing', async t => {
   const call = await setup(t);
@@ -131,6 +143,7 @@ test('disconnect expiry removes guest and deletes abandoned host rooms', async t
 test('invalid builds, incompatible versions and room limits produce actionable errors', async t => {
   const call = await setup(t, { maxRooms: 1 });
   assert.equal((await call('/rooms', { version: 'old', build: build() })).status, 409);
+  assert.equal((await call('/rooms', { version: 'moji-fighter-x-rooms-v3', build: build() })).status, 409);
   assert.equal((await call('/rooms', { version: VERSION, build: build('ab') })).status, 400);
   assert.equal((await call('/rooms', { version: VERSION, build: { ...build(), gripPoint: { x: -1, y: .5 } } })).status, 400);
   assert.equal((await call('/rooms', { version: VERSION, build: build() })).status, 200);

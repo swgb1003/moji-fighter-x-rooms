@@ -1,12 +1,15 @@
 import http from 'node:http';
 import { randomBytes, randomInt } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { checkName, sanitizeSpecial, createClaudeGenerator, createFakeGenerator } from './specials.mjs';
 
-export const VERSION = 'moji-fighter-x-rooms-v3';
+export const VERSION = 'moji-fighter-x-rooms-v4';
 const inputKinds = ['special', 'cheer'];
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-export const SPLIT_KANJI = [...'明休林晴清河村体仁仲伸相朋'];
+// The release copies the same curated structural table used by Unity.
+export const SPLIT_KANJI = readFileSync(new URL('./split-kanji.csv', import.meta.url), 'utf8')
+  .split(/\r?\n/).filter(line => line && !line.startsWith('#')).map(line => line.split(',')[0]);
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 export function allowOrigin(setting, origin) {
   const list = String(setting || '*').split(',').map(x => x.trim()).filter(Boolean);
