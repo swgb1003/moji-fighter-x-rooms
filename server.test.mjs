@@ -10,7 +10,7 @@ const fusionRecipe = () => ({ version: 1, name: '月樹', leftSource: '林', rig
   leftWidth: 1.2, leftHeight: .8, rightWidth: 1.1, rightHeight: 1, leftX: -12, leftY: 8, rightX: 10, rightY: -16, gap: 12 });
 test('fusion recipes survive create/join/edit/start on both hands and strip untrusted fields', async t => {
   const call = await setup(t), recipe = fusionRecipe();
-  const loadout = { ...build('相'), fusion: { ...recipe, png: 'untrusted', attack: 9999 }, gripType: 4, splitMing: true, splitSwapped: true };
+  const loadout = { ...build('相'), fusionEnabled: true, fusion: { ...recipe, png: 'untrusted', attack: 9999 }, gripType: 4, splitMing: true, splitSwapped: true };
   // 木 + 月 is an invented character in this structural table, so it retains the neutral identity 合.
   const rows = readFileSync(new URL('./split-kanji.csv', import.meta.url), 'utf8').split(/\r?\n/).map(l => l.split(','));
   const identity = rows.find(r => r[3] === 'lr' && r[1] === '木' && r[2] === '月')?.[0] ?? '合';
@@ -19,7 +19,7 @@ test('fusion recipes survive create/join/edit/start on both hands and strip untr
   const path = `/rooms/${host.code}`;
   const guest = await call(path + '/join', { version: VERSION, build: build('刀') });
   assert.deepEqual(guest.players[0].build.fusion, recipe); assert.equal(guest.players[0].build.splitMing, true);
-  const edited = await call(path + '/build', { build: { ...build('刀'), gripType: 4, offhandCharacter: identity, offhandFusion: recipe } }, host.token);
+  const edited = await call(path + '/build', { build: { ...build('刀'), gripType: 4, offhandCharacter: identity, offhandFusionEnabled: true, offhandFusion: recipe } }, host.token);
   assert.equal(edited.status, 200); assert.deepEqual(edited.players[0].build.offhandFusion, recipe); assert.equal(edited.players[0].build.fusion, null);
   await call(path + '/ready', { ready: true }, host.token); await call(path + '/ready', { ready: true }, guest.token);
   const started = await call(path + '/start', {}, host.token); assert.equal(started.stage, 'battle');
@@ -30,11 +30,15 @@ test('fusion rejects invalid sources, layout bounds, identity mismatches, versio
   const call = await setup(t), recipe = fusionRecipe();
   for (const patch of [{ leftSource: '国' }, { rightSource: 'A' }, { gap: 25 }, { leftWidth: .69 }, { rightHeight: 1.31 },
     { leftX: -21 }, { rightY: 25 }, { gap: null }, { leftWidth: '1' }, { version: 2 }, { name: '字'.repeat(13) }, { name: 'a\nb' }])
-    assert.equal((await call('/rooms', { version: VERSION, build: { ...build('合'), fusion: { ...recipe, ...patch } } })).status, 400, JSON.stringify(patch));
-  assert.equal((await call('/rooms', { version: VERSION, build: { ...build('刀'), fusion: recipe } })).status, 400);
-  assert.equal((await call('/rooms', { version: VERSION, build: { ...build(), offhandFusion: recipe } })).status, 400);
+    assert.equal((await call('/rooms', { version: VERSION, build: { ...build('合'), fusionEnabled: true, fusion: { ...recipe, ...patch } } })).status, 400, JSON.stringify(patch));
+  assert.equal((await call('/rooms', { version: VERSION, build: { ...build('刀'), fusionEnabled: true, fusion: recipe } })).status, 400);
+  assert.equal((await call('/rooms', { version: VERSION, build: { ...build(), offhandFusionEnabled: true, offhandFusion: recipe } })).status, 400);
   const normal = await call('/rooms', { version: VERSION, build: build() }); assert.equal(normal.status, 200);
   assert.equal(normal.players[0].build.fusion, null);
+  // JsonUtility serializes a null inline class as its default fields. Presence bits are authoritative.
+  const inlineNull = await call('/rooms', { version: VERSION, build: { ...build('刀'), fusionEnabled: false, offhandFusionEnabled: false, fusion: recipe, offhandFusion: recipe } });
+  assert.equal(inlineNull.status, 200); assert.equal(inlineNull.players[0].build.fusionEnabled, false);
+  assert.equal(inlineNull.players[0].build.fusion, null); assert.equal(inlineNull.players[0].build.offhandFusion, null);
 });
 
 test('structural catalog is unique, covers all three layouts, and matches the Unity release data', () => {

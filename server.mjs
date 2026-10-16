@@ -63,9 +63,10 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
     const offhandGripPoint = independentOffhandGrip ? b.offhandGripPoint : b.gripPoint;
     for (const value of [offhandGripPosition, offhandGripPoint?.x, offhandGripPoint?.y])
       if (!Number.isFinite(value) || value < 0 || value > 1) fail(400, '左手の持ち手の位置を確認してください。');
-    const mainFusion = fusion(b.fusion, b.character.trim());
-    if (b.offhandFusion != null && !offhandCharacter) fail(400, '左手の合成文字を確認してください。');
-    const offhandFusion = fusion(b.offhandFusion, offhandCharacter);
+    if (b.fusionEnabled && b.fusion == null) fail(400, '合成文字のデータがありません。');
+    if (b.offhandFusionEnabled && (!offhandCharacter || b.offhandFusion == null)) fail(400, '左手の合成文字を確認してください。');
+    const mainFusion = b.fusionEnabled ? fusion(b.fusion, b.character.trim()) : null;
+    const offhandFusion = b.offhandFusionEnabled ? fusion(b.offhandFusion, offhandCharacter) : null;
     if (b.splitMing && !mainFusion && !SPLIT_KANJI.includes(b.character.trim())) fail(400, 'この漢字は分離に対応していません。');
     return { character: b.character.trim(), fontType: b.fontType, weaponSize: b.weaponSize, gripType: b.gripType,
       battleStyle: b.battleStyle, weaponFlip: b.weaponFlip, gripPosition: b.gripPosition,
@@ -75,6 +76,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       offhandCustomGrip: independentOffhandGrip ? Boolean(b.offhandCustomGrip) : Boolean(b.customGrip),
       splitMing: Boolean(b.splitMing), splitSwapped: Boolean(b.splitSwapped),
       fusion: mainFusion, offhandFusion,
+      fusionEnabled: mainFusion != null, offhandFusionEnabled: offhandFusion != null,
       special: sanitizeSpecial(b.special, b.character.trim()) };
   }
   function sweep() {
