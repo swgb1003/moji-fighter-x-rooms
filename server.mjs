@@ -25,13 +25,27 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
   function build(b) {
     if (!b || typeof b.character !== 'string' || b.character.length > 12 ||
         [...segmenter.segment(b.character.trim())].length !== 1) fail(400, '文字を一つ選んでください。');
-    for (const [key, max] of Object.entries({ fontType: 3, weaponSize: 3, gripType: 3, battleStyle: 3, weaponFlip: 3 }))
+    for (const [key, max] of Object.entries({ fontType: 3, weaponSize: 3, gripType: 4, battleStyle: 3, weaponFlip: 3 }))
       if (!Number.isInteger(b[key]) || b[key] < 0 || b[key] > max) fail(400, '装備の設定を確認してください。');
     for (const value of [b.gripPosition, b.gripPoint?.x, b.gripPoint?.y])
       if (!Number.isFinite(value) || value < 0 || value > 1) fail(400, '持ち手の位置を確認してください。');
+    if (b.gripType === 4 && b.weaponSize > 1) fail(400, '二刀流はS・Mサイズのみです。');
+    const offhandCharacter = typeof b.offhandCharacter === 'string' ? b.offhandCharacter.trim() : '';
+    if (offhandCharacter && (offhandCharacter.length > 12 || [...segmenter.segment(offhandCharacter)].length !== 1))
+      fail(400, '左手の文字を一つ選んでください。');
+    const independentOffhandGrip = Boolean(b.independentOffhandGrip);
+    const offhandGripPosition = independentOffhandGrip ? b.offhandGripPosition : b.gripPosition;
+    const offhandGripPoint = independentOffhandGrip ? b.offhandGripPoint : b.gripPoint;
+    for (const value of [offhandGripPosition, offhandGripPoint?.x, offhandGripPoint?.y])
+      if (!Number.isFinite(value) || value < 0 || value > 1) fail(400, '左手の持ち手の位置を確認してください。');
+    if (b.splitMing && b.character.trim() !== '明') fail(400, '分離は「明」のみ対応しています。');
     return { character: b.character.trim(), fontType: b.fontType, weaponSize: b.weaponSize, gripType: b.gripType,
       battleStyle: b.battleStyle, weaponFlip: b.weaponFlip, gripPosition: b.gripPosition,
       gripPoint: { x: b.gripPoint.x, y: b.gripPoint.y }, customGrip: Boolean(b.customGrip),
+      offhandCharacter, independentOffhandGrip: true, offhandGripPosition,
+      offhandGripPoint: { x: offhandGripPoint.x, y: offhandGripPoint.y },
+      offhandCustomGrip: independentOffhandGrip ? Boolean(b.offhandCustomGrip) : Boolean(b.customGrip),
+      splitMing: Boolean(b.splitMing), splitSwapped: Boolean(b.splitSwapped),
       special: sanitizeSpecial(b.special, b.character.trim()) };
   }
   function sweep() {
@@ -44,7 +58,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
   }
   function view(r, side, credential = false) {
     return { code: r.code, side, token: credential ? r.players[side].token : '', revision: r.revision,
-      stage: r.stage, matchId: r.matchId, seed: r.seed, frame: r.frame, inputs: r.inputs,
+      stage: r.stage, arena: r.arena ?? 0, matchId: r.matchId, seed: r.seed, frame: r.frame, inputs: r.inputs,
       players: r.players.map(p => ({ joined: !!p, ready: !!p?.ready, build: p?.build ?? null })) };
   }
   const server = http.createServer(async (req, res) => {
@@ -68,7 +82,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       if (limits.size > 4096) for (const [k, v] of limits) if (t > v.reset) limits.delete(k);
       sweep();
       const path = new URL(req.url, 'http://local').pathname;
-      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial) })); return; }
+      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial), capabilities: { dualGrip: true, splitMing: true, stages: true } })); return; }
       let body = {};
       if (req.method === 'POST') {
         let size = 0, chunks = [];
@@ -109,10 +123,10 @@ ${name}`;
         if (rooms.size >= maxRooms) fail(503, '現在、部屋がいっぱいです。');
         let code;
         do { code = Array.from({ length: 6 }, () => alphabet[randomInt(alphabet.length)]).join(''); } while (rooms.has(code));
-        const r = { code, players: [player(body.build), null], revision: 1, stage: 'lobby', seed: 0, matchId: 0,
+        const r = { code, players: [player(body.build), null], revision: 1, stage: 'lobby', arena: 0, seed: 0, matchId: 0,
           frame: null, inputs: [], created: now() }; rooms.set(code, r); result = view(r, 0, true);
       } else {
-        const match = /^\/rooms\/([A-Z2-9]{6})(?:\/(join|build|ready|start|frame|input|lobby|leave))?$/.exec(path);
+        const match = /^\/rooms\/([A-Z2-9]{6})(?:\/(join|build|ready|arena|start|frame|input|lobby|leave))?$/.exec(path);
         if (!match) fail(404, '部屋が見つかりません。');
         const r = rooms.get(match[1]); if (!r) fail(404, '部屋が見つかりません。コードを確認してください。');
         const action = match[2];
@@ -130,6 +144,16 @@ ${name}`;
           else if (action === 'build') {
             if (r.stage !== 'lobby') fail(409, '対戦中は装備を変更できません。');
             p.build = build(body.build); p.ready = false; r.revision++; result = view(r, side);
+          } else if (action === 'arena') {
+            if (side !== 0) fail(403, 'ステージはホストが選びます。');
+            if (r.stage !== 'lobby') fail(409, '対戦中はステージを変更できません。');
+            if (!Number.isInteger(body.arena) || body.arena < 0 || body.arena > 5) fail(400, 'ステージを選び直してください。');
+            if (r.arena !== body.arena) {
+              r.arena = body.arena;
+              for (const item of r.players) if (item) item.ready = false;
+              r.revision++;
+            }
+            result = view(r, side);
           } else if (action === 'ready') {
             if (r.stage !== 'lobby') fail(409, '対戦中です。');
             p.ready = Boolean(body.ready); r.revision++; result = view(r, side);

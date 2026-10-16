@@ -4,6 +4,46 @@ import { createRoomServer, VERSION } from './server.mjs';
 
 const build = (character = '力') => ({ character, fontType: 1, weaponSize: 1, gripType: 0, battleStyle: 0,
   weaponFlip: 0, gripPosition: .5, customGrip: false, gripPoint: { x: .5, y: .5 } });
+
+test('dual wield preserves both grips, split components and legacy builds through room sharing', async t => {
+  const call = await setup(t);
+  const loadout = { ...build('明'), gripType: 4, independentOffhandGrip: true,
+    customGrip: true, gripPoint: { x: .15, y: .8 }, offhandGripPosition: .5,
+    offhandCustomGrip: true, offhandGripPoint: { x: .85, y: .2 }, splitMing: true, splitSwapped: true };
+  const host = await call('/rooms', { version: VERSION, build: loadout });
+  assert.equal(host.status, 200);
+  const path = `/rooms/${host.code}`;
+  const guest = await call(path + '/join', { version: VERSION, build: build('刀') });
+  assert.deepEqual(guest.players[0].build.gripPoint, loadout.gripPoint);
+  assert.deepEqual(guest.players[0].build.offhandGripPoint, loadout.offhandGripPoint);
+  assert.equal(guest.players[0].build.splitMing, true);
+  assert.equal(guest.players[0].build.splitSwapped, true);
+  const edited = await call(path + '/build', { build: { ...loadout, character: '刀', splitMing: false, offhandCharacter: '月' } }, host.token);
+  assert.equal(edited.players[0].build.offhandCharacter, '月');
+  for (const bad of [
+    { ...loadout, weaponSize: 2 }, { ...loadout, character: '日' },
+    { ...loadout, offhandGripPoint: { x: 2, y: .5 } }, { ...loadout, offhandCharacter: '日月' },
+  ]) assert.equal((await call(path + '/build', { build: bad }, host.token)).status, 400);
+  const legacy = guest.players[1].build;
+  assert.equal(legacy.independentOffhandGrip, true);
+  assert.deepEqual(legacy.offhandGripPoint, legacy.gripPoint);
+});
+
+test('only host selects a valid arena in lobby; changing it revokes both ready states', async t => {
+  const call = await setup(t), host = await call('/rooms', {version: VERSION, build: build()}), path = `/rooms/${host.code}`;
+  const guest = await call(path + '/join', {version: VERSION, build: build('水')});
+  assert.equal(host.arena, 0);
+  assert.equal((await call(path + '/arena', {arena: 3}, guest.token)).status, 403);
+  for (const arena of [-1, 6, 1.5, '2']) assert.equal((await call(path + '/arena', {arena}, host.token)).status, 400);
+  await call(path + '/ready', {ready: true}, host.token); await call(path + '/ready', {ready: true}, guest.token);
+  const changed = await call(path + '/arena', {arena: 5}, host.token);
+  assert.equal(changed.arena, 5);assert.ok(changed.players.every(p => !p.ready));
+  assert.equal((await call(path, null, guest.token)).arena, 5);
+  await call(path + '/ready', {ready: true}, host.token); await call(path + '/ready', {ready: true}, guest.token);
+  assert.equal((await call(path + '/arena', {arena: 5}, host.token)).players.every(p => p.ready), true);
+  const started = await call(path + '/start', {}, host.token);assert.equal(started.arena, 5);
+  assert.equal((await call(path + '/arena', {arena: 2}, host.token)).status, 409);
+});
 async function setup(t, options) {
   const server = createRoomServer(options);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
