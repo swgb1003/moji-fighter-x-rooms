@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { checkName, sanitizeSpecial, createClaudeGenerator, createFakeGenerator } from './specials.mjs';
 
-export const VERSION = 'moji-fighter-x-rooms-v5';
+export const VERSION = 'moji-fighter-x-rooms-v6';
 const inputKinds = ['special', 'cheer'];
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 // The release copies the same curated structural table used by Unity.
@@ -12,6 +12,7 @@ const structuralRows = readFileSync(new URL('./split-kanji.csv', import.meta.url
   .split(/\r?\n/).filter(line => line && !line.startsWith('#')).map(line => line.split(','));
 export const SPLIT_KANJI = structuralRows.map(row => row[0]);
 const leftRight = new Map(structuralRows.filter(row => row[3] === 'lr').map(row => [row[0], row]));
+const allParts = new Map(structuralRows.map(row => [row[0], row]));
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 export function allowOrigin(setting, origin) {
   const list = String(setting || '*').split(',').map(x => x.trim()).filter(Boolean);
@@ -30,9 +31,18 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
   const segmenter = new Intl.Segmenter('ja', { granularity: 'grapheme' });
   function fusion(value, character) {
     if (value == null) return null;
-    if (typeof value !== 'object' || Array.isArray(value) || value.version !== 1 || !leftRight.has(value.leftSource) || !leftRight.has(value.rightSource))
+    if (typeof value !== 'object' || Array.isArray(value) || ![1, 2].includes(value.version))
       fail(400, '合成文字の部品を確認してください。');
-    const result = { version: 1, name: value.name, leftSource: value.leftSource, rightSource: value.rightSource };
+    const sources = value.version === 1 ? leftRight : allParts;
+    if (!sources.has(value.leftSource) || !sources.has(value.rightSource)) fail(400, '合成文字の部品を確認してください。');
+    const result = { version: value.version, name: value.name, leftSource: value.leftSource, rightSource: value.rightSource };
+    if (value.version === 2) {
+      if (!Number.isInteger(value.layout) || value.layout < 0 || value.layout > 2 ||
+          typeof value.leftUseSecond !== 'boolean' || typeof value.rightUseFirst !== 'boolean') fail(400, '合成文字の配置を確認してください。');
+      Object.assign(result, { layout: value.layout, leftUseSecond: value.leftUseSecond, rightUseFirst: value.rightUseFirst });
+    } else if ((value.layout != null && value.layout !== 0) || value.leftUseSecond || value.rightUseFirst) {
+      fail(400, '旧形式の合成文字の部品を確認してください。');
+    }
     if (typeof result.name !== 'string' || result.name.length > 24 || [...segmenter.segment(result.name)].length > 12 || /[\u0000-\u001f\u007f-\u009f]/u.test(result.name))
       fail(400, '合成文字の名前は12文字までです。');
     for (const [key, min, max] of [
@@ -42,8 +52,9 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       if (!Number.isFinite(value[key]) || value[key] < min || value[key] > max) fail(400, '合成文字の配置を確認してください。');
       result[key] = value[key];
     }
-    const first = leftRight.get(result.leftSource)[1], second = leftRight.get(result.rightSource)[2];
-    const identity = structuralRows.find(row => row[3] === 'lr' && row[1] === first && row[2] === second)?.[0] ?? '合';
+    const first = sources.get(result.leftSource)[result.leftUseSecond ? 2 : 1], second = sources.get(result.rightSource)[result.rightUseFirst ? 1 : 2];
+    const layout = ['lr', 'tb', 'enc'][result.layout ?? 0];
+    const identity = structuralRows.find(row => row[3] === layout && row[1] === first && row[2] === second)?.[0] ?? '合';
     if (identity !== character) fail(400, '合成文字の情報が一致しません。');
     return result;
   }
@@ -113,7 +124,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       if (limits.size > 4096) for (const [k, v] of limits) if (t > v.reset) limits.delete(k);
       sweep();
       const path = new URL(req.url, 'http://local').pathname;
-      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial), capabilities: { dualGrip: true, splitMing: true, stages: true, fusion: true, fusionVersion: 1, splitCharacters: SPLIT_KANJI } })); return; }
+      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial), capabilities: { dualGrip: true, splitMing: true, stages: true, fusion: true, fusionVersion: 2, fusionLayouts: ['lr', 'tb', 'enc'], splitCharacters: SPLIT_KANJI } })); return; }
       let body = {};
       if (req.method === 'POST') {
         let size = 0, chunks = [];

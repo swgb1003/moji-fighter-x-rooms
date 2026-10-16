@@ -8,6 +8,30 @@ const build = (character = '力') => ({ character, fontType: 1, weaponSize: 1, g
 
 const fusionRecipe = () => ({ version: 1, name: '月樹', leftSource: '林', rightSource: '明',
   leftWidth: 1.2, leftHeight: .8, rightWidth: 1.1, rightHeight: 1, leftX: -12, leftY: 8, rightX: 10, rightY: -16, gap: 12 });
+const fusionRows = readFileSync(new URL('./split-kanji.csv', import.meta.url), 'utf8')
+  .split(/\r?\n/).filter(l => l && !l.startsWith('#')).map(l => l.split(','));
+for (const layout of [0, 1, 2]) test(`v2 layout ${layout} round trips both components of all 121 sources`, async t => {
+  const call = await setup(t), host = await call('/rooms', { version: VERSION, build: build() }), path = `/rooms/${host.code}`;
+  assert.equal(fusionRows.length, 121);
+  for (const row of fusionRows) for (const swapped of [false, true]) {
+    const recipe = { ...fusionRecipe(), version: 2, leftSource: row[0], rightSource: row[0], layout,
+      leftUseSecond: swapped, rightUseFirst: swapped };
+    const first = row[swapped ? 2 : 1], second = row[swapped ? 1 : 2];
+    const identity = fusionRows.find(r => r[3] === ['lr', 'tb', 'enc'][layout] && r[1] === first && r[2] === second)?.[0] ?? '合';
+    const changed = await call(path + '/build', { build: { ...build(identity), fusionEnabled: true,
+      fusion: { ...recipe, png: 'discard', attack: 999 }, gripType: 4, splitMing: true } }, host.token);
+    assert.equal(changed.status, 200, row[0]); assert.deepEqual(changed.players[0].build.fusion, recipe);
+  }
+  const health = await call('/health'); assert.equal(health.capabilities.fusionVersion, 2);
+});
+test('v2 rejects unknown parts, malformed selections and invalid layouts', async t => {
+  const call = await setup(t);
+  const recipe = { ...fusionRecipe(), version: 2, layout: 1, leftUseSecond: true, rightUseFirst: false };
+  for (const patch of [{ layout: -1 }, { layout: 3 }, { layout: .5 }, { layout: '1' }, { layout: null },
+    { leftUseSecond: 1 }, { rightUseFirst: 'false' }, { rightUseFirst: null }, { leftSource: '一' }, { version: 3 }])
+    assert.equal((await call('/rooms', { version: VERSION, build: { ...build('合'), fusionEnabled: true,
+      fusion: { ...recipe, ...patch } } })).status, 400, JSON.stringify(patch));
+});
 test('fusion recipes survive create/join/edit/start on both hands and strip untrusted fields', async t => {
   const call = await setup(t), recipe = fusionRecipe();
   const loadout = { ...build('相'), fusionEnabled: true, fusion: { ...recipe, png: 'untrusted', attack: 9999 }, gripType: 4, splitMing: true, splitSwapped: true };
