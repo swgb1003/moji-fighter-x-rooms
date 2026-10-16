@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { checkName, sanitizeSpecial, createClaudeGenerator, createFakeGenerator } from './specials.mjs';
 
-export const VERSION = 'moji-fighter-x-rooms-v6';
+export const VERSION = 'moji-fighter-x-rooms-v7';
 const inputKinds = ['special', 'cheer'];
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 // The release copies the same curated structural table used by Unity.
@@ -88,7 +88,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       splitMing: Boolean(b.splitMing), splitSwapped: Boolean(b.splitSwapped),
       fusion: mainFusion, offhandFusion,
       fusionEnabled: mainFusion != null, offhandFusionEnabled: offhandFusion != null,
-      special: sanitizeSpecial(b.special, b.character.trim()) };
+      special: sanitizeSpecial(b.special, b.character.trim(), mainFusion) };
   }
   function sweep() {
     for (const [code, r] of rooms) {
@@ -124,7 +124,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       if (limits.size > 4096) for (const [k, v] of limits) if (t > v.reset) limits.delete(k);
       sweep();
       const path = new URL(req.url, 'http://local').pathname;
-      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial), capabilities: { dualGrip: true, splitMing: true, stages: true, fusion: true, fusionVersion: 2, fusionLayouts: ['lr', 'tb', 'enc'], splitCharacters: SPLIT_KANJI } })); return; }
+      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial), capabilities: { dualGrip: true, splitMing: true, stages: true, fusion: true, fusionVersion: 2, fusionSpecials: true, fusionLayouts: ['lr', 'tb', 'enc'], splitCharacters: SPLIT_KANJI } })); return; }
       let body = {};
       if (req.method === 'POST') {
         let size = 0, chunks = [];
@@ -135,10 +135,11 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       let result;
       if (path === '/specials' && req.method === 'POST') {
         if (body.version !== VERSION) fail(409, 'ゲームのバージョンをそろえてください。');
-        const name = checkName(body.name, body.character), character = body.character.trim();
+        if (body.fusionEnabled && body.fusion == null) fail(400, '合成文字のデータがありません。');
+        const recipe = body.fusionEnabled ? fusion(body.fusion, typeof body.character === 'string' ? body.character.trim() : '') : null;
+        const name = checkName(body.name, body.character, recipe != null), character = body.character.trim();
         if (!generateSpecial) fail(503, 'AI の技づくりは準備中です。');
-        const key = `${character}
-${name}`;
+        const key = JSON.stringify([character, recipe, name]);
         let made = specialCache.get(key);
         if (!made) {
           const quota = specialLimits.get(ip) ?? { count: 0, reset: t + 3600000 };
@@ -150,11 +151,19 @@ ${name}`;
           if (specialLimits.size > 4096) for (const [k, v] of specialLimits) if (t > v.reset) specialLimits.delete(k);
           // Same name requested twice at once: share one AI call.
           let job = pending.get(key);
-          if (!job) { job = generateSpecial({ character, name }); pending.set(key, job); }
+          if (!job) {
+            let weaponDescription;
+            if (recipe) {
+              const first = allParts.get(recipe.leftSource)[recipe.leftUseSecond ? 2 : 1];
+              const second = allParts.get(recipe.rightSource)[recipe.rightUseFirst ? 1 : 2];
+              weaponDescription = `合成文字「${recipe.name || first + '＋' + second}」。素材: ${recipe.leftSource}の${first} ＋ ${recipe.rightSource}の${second}。配置: ${['左右', '上下', '囲み'][recipe.layout ?? 0]}。通常の文字コードを持たない創作字。`;
+            }
+            job = generateSpecial({ character, name, weaponDescription }); pending.set(key, job);
+          }
           let raw;
           try { raw = await job; } finally { pending.delete(key); }
           if (!raw || raw.ok === false) fail(422, (typeof raw?.reason === 'string' && raw.reason.trim().slice(0, 60)) || 'この技名では作れませんでした。');
-          made = sanitizeSpecial({ ...raw, name }, character);
+          made = sanitizeSpecial({ ...raw, name, ...(recipe ? { fusionEnabled: true, fusion: recipe } : {}) }, character, recipe);
           if (!made) fail(502, 'AI で技を作れませんでした。');
           specialCache.set(key, made);
           if (specialCache.size > 2000) specialCache.delete(specialCache.keys().next().value);

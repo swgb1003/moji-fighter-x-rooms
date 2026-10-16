@@ -246,6 +246,36 @@ test('behind a trusted proxy, rate limits apply per forwarded client', async t =
 
 const designed = { ok: true, reason: '', reading: 'えんりゅういっせん', steps: ['Launch', 'StrokeShot', 'Teleport'], power: 5, speed: 5, reach: 5,
   element: 'fire', effect: 'pillar', primary: '#ff3300', secondary: 'red', callout: '燃え尽きろ！', description: '炎の龍が昇る。' };
+test('fusion specials accept free names, pass actual materials to AI, isolate cache and survive room sharing', async t => {
+  let calls = 0, prompt;
+  const call = await setup(t, { generateSpecial: async request => { calls++; prompt = request.weaponDescription; return designed; } });
+  const recipe = { ...fusionRecipe(), version: 2, name: '海織', leftSource: '紅', rightSource: '海', layout: 0, leftUseSecond: false, rightUseFirst: false };
+  const request = { version: VERSION, character: '合', name: '蒼流一閃', fusionEnabled: true, fusion: recipe };
+  for (const patch of [{ name: '' }, { name: '字'.repeat(8) }, { name: '<b>' }, { fusion: null },
+    { fusion: { ...recipe, leftSource: '一' } }, { character: '刀' }, { fusionEnabled: false }])
+    assert.equal((await call('/specials', { ...request, ...patch })).status, 400);
+  assert.equal(calls, 0);
+  const made = await call('/specials', request); assert.equal(made.status, 200); assert.equal(made.special.name, '蒼流一閃');
+  assert.equal(made.special.fusionEnabled, true); assert.deepEqual(made.special.fusion, recipe);
+  assert.match(prompt, /海織/); assert.match(prompt, /紅の糸/); assert.match(prompt, /海の毎/);
+  await call('/specials', request); assert.equal(calls, 1);
+  const different = { ...recipe, leftSource: '林', rightSource: '明' };
+  await call('/specials', { ...request, fusion: different }); assert.equal(calls, 2);
+  const host = await call('/rooms', { version: VERSION, build: { ...build('合'), fusionEnabled: true, fusion: recipe, special: made.special } });
+  const path = `/rooms/${host.code}`;
+  const guest = await call(path + '/join', { version: VERSION, build: build('刀') });
+  assert.deepEqual(guest.players[0].build.special, made.special);
+  for (const patch of [{ fusion: different }, { fusionEnabled: false }, { fusion: { ...recipe, gap: 18 } }]) {
+    const changed = await call(path + '/build', { build: { ...build('合'), fusionEnabled: true, fusion: recipe, special: made.special, ...patch } }, host.token);
+    assert.equal(changed.players[0].build.special, null);
+  }
+  const renamed = await call(path + '/build', { build: { ...build('合'), fusionEnabled: true, fusion: { ...recipe, name: '新しい名前' }, special: made.special } }, host.token);
+  assert.equal(renamed.players[0].build.special.name, '蒼流一閃');
+  const legacy = await call(path + '/build', { build: { ...build('合'), fusionEnabled: true, fusion: recipe, special: { ...designed, name: '合輪斬' } } }, host.token);
+  assert.equal(legacy.players[0].build.special.fusionEnabled, true);
+  await call(path + '/ready', { ready: true }, host.token); await call(path + '/ready', { ready: true }, guest.token);
+  assert.equal((await call(path + '/start', {}, host.token)).stage, 'battle');
+});
 test('special moves: name rules, AI design is clamped to the stat budget, cached, and rate limited', async t => {
   let calls = 0;
   const call = await setup(t, { specialsPerHour: 3, generateSpecial: async ({ character, name }) => {
@@ -295,6 +325,8 @@ test('the Claude request asks for the schema-shaped design and reads it back', a
   assert.equal(sent.model, 'claude-opus-5-5'); assert.equal(sent.fallbacks, 'default');
   assert.equal(sent.output_config.format.type, 'json_schema'); assert.equal(sent.output_config.effort, 'low');
   assert.match(sent.messages[0].content, /炎龍一閃/);
+  await generate({ character: '合', name: '蒼流一閃', weaponDescription: '合成文字「海織」。紅の糸と海の毎。' });
+  assert.match(sent.messages[0].content, /海織/); assert.doesNotMatch(sent.messages[0].content, /武器の文字: 合\n/);
   assert.match(headers.get('anthropic-beta'), /server-side-fallback-2026-07-01/);
 });
 test('CORS allows the production site and its Vercel deployment URLs only', async () => {
