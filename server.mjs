@@ -4,12 +4,14 @@ import { pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { checkName, sanitizeSpecial, createClaudeGenerator, createFakeGenerator } from './specials.mjs';
 
-export const VERSION = 'moji-fighter-x-rooms-v4';
+export const VERSION = 'moji-fighter-x-rooms-v5';
 const inputKinds = ['special', 'cheer'];
 const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 // The release copies the same curated structural table used by Unity.
-export const SPLIT_KANJI = readFileSync(new URL('./split-kanji.csv', import.meta.url), 'utf8')
-  .split(/\r?\n/).filter(line => line && !line.startsWith('#')).map(line => line.split(',')[0]);
+const structuralRows = readFileSync(new URL('./split-kanji.csv', import.meta.url), 'utf8')
+  .split(/\r?\n/).filter(line => line && !line.startsWith('#')).map(line => line.split(','));
+export const SPLIT_KANJI = structuralRows.map(row => row[0]);
+const leftRight = new Map(structuralRows.filter(row => row[3] === 'lr').map(row => [row[0], row]));
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 export function allowOrigin(setting, origin) {
   const list = String(setting || '*').split(',').map(x => x.trim()).filter(Boolean);
@@ -26,6 +28,25 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
   const specialLimits = new Map(), specialCache = new Map(), pending = new Map();
   let specialDay = { count: 0, reset: now() + 86400000 };
   const segmenter = new Intl.Segmenter('ja', { granularity: 'grapheme' });
+  function fusion(value, character) {
+    if (value == null) return null;
+    if (typeof value !== 'object' || Array.isArray(value) || value.version !== 1 || !leftRight.has(value.leftSource) || !leftRight.has(value.rightSource))
+      fail(400, '合成文字の部品を確認してください。');
+    const result = { version: 1, name: value.name, leftSource: value.leftSource, rightSource: value.rightSource };
+    if (typeof result.name !== 'string' || result.name.length > 24 || [...segmenter.segment(result.name)].length > 12 || /[\u0000-\u001f\u007f-\u009f]/u.test(result.name))
+      fail(400, '合成文字の名前は12文字までです。');
+    for (const [key, min, max] of [
+      ['leftWidth', .7, 1.3], ['leftHeight', .7, 1.3], ['rightWidth', .7, 1.3], ['rightHeight', .7, 1.3],
+      ['leftX', -20, 20], ['rightX', -20, 20], ['leftY', -24, 24], ['rightY', -24, 24], ['gap', 0, 24],
+    ]) {
+      if (!Number.isFinite(value[key]) || value[key] < min || value[key] > max) fail(400, '合成文字の配置を確認してください。');
+      result[key] = value[key];
+    }
+    const first = leftRight.get(result.leftSource)[1], second = leftRight.get(result.rightSource)[2];
+    const identity = structuralRows.find(row => row[3] === 'lr' && row[1] === first && row[2] === second)?.[0] ?? '合';
+    if (identity !== character) fail(400, '合成文字の情報が一致しません。');
+    return result;
+  }
   function build(b) {
     if (!b || typeof b.character !== 'string' || b.character.length > 12 ||
         [...segmenter.segment(b.character.trim())].length !== 1) fail(400, '文字を一つ選んでください。');
@@ -42,7 +63,10 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
     const offhandGripPoint = independentOffhandGrip ? b.offhandGripPoint : b.gripPoint;
     for (const value of [offhandGripPosition, offhandGripPoint?.x, offhandGripPoint?.y])
       if (!Number.isFinite(value) || value < 0 || value > 1) fail(400, '左手の持ち手の位置を確認してください。');
-    if (b.splitMing && !SPLIT_KANJI.includes(b.character.trim())) fail(400, 'この漢字は分離に対応していません。');
+    const mainFusion = fusion(b.fusion, b.character.trim());
+    if (b.offhandFusion != null && !offhandCharacter) fail(400, '左手の合成文字を確認してください。');
+    const offhandFusion = fusion(b.offhandFusion, offhandCharacter);
+    if (b.splitMing && !mainFusion && !SPLIT_KANJI.includes(b.character.trim())) fail(400, 'この漢字は分離に対応していません。');
     return { character: b.character.trim(), fontType: b.fontType, weaponSize: b.weaponSize, gripType: b.gripType,
       battleStyle: b.battleStyle, weaponFlip: b.weaponFlip, gripPosition: b.gripPosition,
       gripPoint: { x: b.gripPoint.x, y: b.gripPoint.y }, customGrip: Boolean(b.customGrip),
@@ -50,6 +74,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       offhandGripPoint: { x: offhandGripPoint.x, y: offhandGripPoint.y },
       offhandCustomGrip: independentOffhandGrip ? Boolean(b.offhandCustomGrip) : Boolean(b.customGrip),
       splitMing: Boolean(b.splitMing), splitSwapped: Boolean(b.splitSwapped),
+      fusion: mainFusion, offhandFusion,
       special: sanitizeSpecial(b.special, b.character.trim()) };
   }
   function sweep() {
@@ -86,7 +111,7 @@ export function createRoomServer({ now = Date.now, grace = 20000, maxRooms = 100
       if (limits.size > 4096) for (const [k, v] of limits) if (t > v.reset) limits.delete(k);
       sweep();
       const path = new URL(req.url, 'http://local').pathname;
-      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial), capabilities: { dualGrip: true, splitMing: true, stages: true, splitCharacters: SPLIT_KANJI } })); return; }
+      if (path === '/health' && req.method === 'GET') { res.end(JSON.stringify({ ok: true, version: VERSION, specials: Boolean(generateSpecial), capabilities: { dualGrip: true, splitMing: true, stages: true, fusion: true, fusionVersion: 1, splitCharacters: SPLIT_KANJI } })); return; }
       let body = {};
       if (req.method === 'POST') {
         let size = 0, chunks = [];
